@@ -83,6 +83,43 @@ def start_research(payload: ResearchRequest, background_tasks: BackgroundTasks, 
         "message": f"LangGraph research workflow started for {symbol}.",
     }
 
+@router.get("/{research_id}/status")
+def get_research_status(research_id: str, db: Session = Depends(get_db)):
+    """
+    GET /api/research/{research_id}/status
+    Return current agent statuses. Checks memory first, falls back to DB.
+    """
+    mem_task = active_research_tasks.get(research_id)
+    if mem_task:
+        return {
+            "research_id": research_id,
+            "status": mem_task.get("status", "running"),
+            "agents": mem_task.get("agents", {}),
+            "data_available": mem_task.get("data") is not None,
+            "message": mem_task.get("message", ""),
+        }
+
+    # Fallback: look up DB (covers server restart scenario)
+    research_entry = db.query(Research).filter(Research.id == research_id).first()
+    if not research_entry:
+        raise HTTPException(status_code=404, detail=f"Research '{research_id}' not found. It may belong to a previous server session.")
+
+    is_completed = research_entry.status == "completed"
+    is_failed = research_entry.status == "failed"
+    agent_status_val = "completed" if is_completed else ("failed" if is_failed else research_entry.status)
+
+    return {
+        "research_id": research_entry.id,
+        "status": research_entry.status,
+        "data_available": is_completed,
+        "agents": {
+            "stock_agent": {"status": agent_status_val, "message": "Alpha Vantage processing complete" if is_completed else research_entry.status},
+            "news_agent": {"status": agent_status_val, "message": "DuckDuckGo search complete" if is_completed else research_entry.status},
+            "analysis_agent": {"status": agent_status_val, "message": "Financial analysis complete" if is_completed else research_entry.status},
+            "report_agent": {"status": agent_status_val, "message": "Report generated" if is_completed else research_entry.status},
+        },
+    }
+
 @router.get("/{research_id}")
 def get_research_results(research_id: str, db: Session = Depends(get_db)):
     """
@@ -107,10 +144,26 @@ def get_research_results(research_id: str, db: Session = Depends(get_db)):
             "final_report": data.get("final_report", {}).get("final_summary", ""),
         }
 
+    # Return running status from memory even if data not yet ready
+    if mem_task:
+        return {
+            "research_id": research_id,
+            "stock_symbol": mem_task.get("symbol", ""),
+            "status": mem_task.get("status", "running"),
+            "agents": mem_task.get("agents", {}),
+            "stock_data": {},
+            "news_data": [],
+            "company_overview": {},
+            "deterministic_metrics": {},
+            "financial_analysis": {},
+            "final_report_data": {},
+            "final_report": "",
+        }
+
     # Fallback to DB
     research_entry = db.query(Research).filter(Research.id == research_id).first()
     if not research_entry:
-        raise HTTPException(status_code=404, detail="Research session not found")
+        raise HTTPException(status_code=404, detail=f"Research '{research_id}' not found. It may belong to a previous server session.")
 
     report_entry = db.query(ResearchReport).filter(ResearchReport.research_id == research_id).first()
     if report_entry:
@@ -121,58 +174,31 @@ def get_research_results(research_id: str, db: Session = Depends(get_db)):
             "status": research_entry.status,
             "created_at": research_entry.created_at.isoformat() if research_entry.created_at else None,
             "executive_summary": report_entry.executive_summary,
-            "stock_data": report_entry.stock_data,
-            "news_data": report_entry.news_data,
-            "financial_analysis": report_entry.financial_analysis,
-            "final_report": report_entry.final_report,
+            "stock_data": report_entry.stock_data or {},
+            "news_data": report_entry.news_data or [],
+            "financial_analysis": report_entry.financial_analysis or {},
+            "final_report": report_entry.final_report or "",
             "final_report_data": {
                 "symbol": research_entry.stock_symbol,
                 "company_name": report_entry.company_name,
                 "executive_summary": report_entry.executive_summary,
-                "company_overview": report_entry.stock_data.get("name", "") if report_entry.stock_data else "",
                 "final_summary": report_entry.final_report,
                 "created_at": report_entry.created_at.isoformat() if report_entry.created_at else None,
-            }
+            },
         }
 
+    # Research exists in DB but report not yet written (still running or failed)
     return {
         "research_id": research_entry.id,
         "stock_symbol": research_entry.stock_symbol,
         "status": research_entry.status,
-        "agents": mem_task.get("agents", {}) if mem_task else {},
+        "agents": {},
+        "stock_data": {},
+        "news_data": [],
+        "company_overview": {},
+        "deterministic_metrics": {},
+        "financial_analysis": {},
+        "final_report_data": {},
+        "final_report": "",
         "created_at": research_entry.created_at.isoformat() if research_entry.created_at else None,
-    }
-
-@router.get("/{research_id}/status")
-def get_research_status(research_id: str, db: Session = Depends(get_db)):
-    """
-    GET /api/research/{research_id}/status
-    Return current agent statuses.
-    """
-    mem_task = active_research_tasks.get(research_id)
-    if mem_task:
-        return {
-            "research_id": research_id,
-            "status": mem_task.get("status", "running"),
-            "agents": mem_task.get("agents", {}),
-            "data_available": mem_task.get("data") is not None,
-            "message": mem_task.get("message", ""),
-        }
-
-    research_entry = db.query(Research).filter(Research.id == research_id).first()
-    if not research_entry:
-        raise HTTPException(status_code=404, detail="Research session not found")
-
-    is_completed = research_entry.status == "completed"
-
-    return {
-        "research_id": research_entry.id,
-        "status": research_entry.status,
-        "data_available": is_completed,
-        "agents": {
-            "stock_agent": {"status": "completed" if is_completed else research_entry.status, "message": "Alpha Vantage processing complete"},
-            "news_agent": {"status": "completed" if is_completed else research_entry.status, "message": "DuckDuckGo search complete"},
-            "analysis_agent": {"status": "completed" if is_completed else research_entry.status, "message": "Financial analysis complete"},
-            "report_agent": {"status": "completed" if is_completed else research_entry.status, "message": "Report generated"},
-        }
     }

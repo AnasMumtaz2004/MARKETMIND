@@ -12,11 +12,7 @@ def search_company_news(symbol: str, company_name: str = "", max_results: int = 
     seen_urls = set()
 
     try:
-        # Prefer current ddgs package, fallback to duckduckgo_search
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
+        from duckduckgo_search import DDGS
 
         with DDGS() as ddgs:
             # First try news search
